@@ -29,7 +29,7 @@ def _config():
     schema = os.environ["DATABRICKS_SCHEMA"]
     table = os.environ.get("DATABRICKS_SHOPIFY_EVENTS_TABLE", "shopify_webhook_events")
     for label, value in (("catalog", catalog), ("schema", schema), ("table", table)):
-        if not re.fullmatch(r"[A-Za-z0-9_]+", value):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
             raise DatabricksError(f"Invalid Databricks {label} identifier.")
     return {
         "host": os.environ["DATABRICKS_HOST"].rstrip("/"),
