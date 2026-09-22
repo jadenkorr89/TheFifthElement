@@ -8,8 +8,20 @@ import functions_framework
 from google import genai
 from google.genai import types
 from antavo import AntavoError, fetch_rewards
-from databricks import DatabricksError, count_shopify_events, store_shopify_event
+from databricks import (
+    DatabricksError,
+    count_shopify_events,
+    store_recovery_feedback,
+    store_shopify_event,
+)
 from recovery import RecoveryError, run_recovery_worker, verify_scheduler_request
+from slack import (
+    SlackError,
+    decode_slack_feedback_push,
+    parse_slack_interaction,
+    publish_slack_feedback,
+    verify_slack_request,
+)
 from shopify import (
     ShopifyWebhookError,
     decode_pubsub_push,
@@ -117,6 +129,44 @@ def rewards_agent(request):
             return {"error": "Could not queue webhook."}, 503
         return {"ok": True, "queued": True, "message_id": message_id}, 200
 
+    if path == "/slack/interactions":
+        if request.method != "POST":
+            return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+        raw_body = request.get_data(cache=True)
+        if not verify_slack_request(
+            raw_body,
+            request.headers.get("X-Slack-Request-Timestamp"),
+            request.headers.get("X-Slack-Signature"),
+        ):
+            return {"error": "Invalid Slack signature."}, 401
+        try:
+            feedback = parse_slack_interaction(raw_body)
+            publish_slack_feedback(feedback)
+        except SlackError as exc:
+            return {"error": str(exc)}, 400
+        except Exception:
+            logging.exception("Could not queue Slack feedback")
+            return {"error": "Could not queue feedback."}, 503
+        return {
+            "response_type": "ephemeral",
+            "text": f"Feedback recorded: {feedback['feedback']}",
+        }, 200
+
+    if path == "/internal/slack/process":
+        if request.method != "POST":
+            return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+        if not verify_pubsub_push(request):
+            return {"error": "Invalid Pub/Sub identity."}, 401
+        try:
+            feedback = decode_slack_feedback_push(request.get_json(silent=True))
+            store_recovery_feedback(feedback)
+        except SlackError as exc:
+            return {"error": str(exc)}, 400
+        except DatabricksError:
+            logging.exception("Could not store Slack feedback")
+            return {"error": "Could not store feedback."}, 503
+        return "", 204
+
     if path == "/jobs/recovery/run":
         if request.method != "POST":
             return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
@@ -148,7 +198,7 @@ def rewards_agent(request):
             'ok': True,
             'service': 'the-fifth-element',
             'source': 'github',
-            'deployment_marker': 'recovery-worker-1',
+            'deployment_marker': 'slack-feedback-1',
         }, 200
     if request.method != 'POST':
         return {'error': 'Use GET for health or POST with a JSON object containing prompt.'}, 405, {'Allow': 'GET, POST'}
