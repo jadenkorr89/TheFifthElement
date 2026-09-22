@@ -16,41 +16,19 @@ class SlackError(Exception):
     pass
 
 
-def post_recovery_decision(decision, snapshot):
+def post_recovery_decision(decision):
     token = os.environ.get("SLACK_BOT_TOKEN", "")
     channel = os.environ.get("SLACK_CHANNEL_ID", "")
     if not token or not channel:
         raise SlackError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required.")
     action = decision["recommended_action"]
     reason = decision["reason"]
-    subject = decision.get("message_subject") or "(none)"
-    body = decision.get("message_body") or "(none)"
-    items = snapshot.get("items") or []
-    item_text = "\n".join(
-        f"• {item.get('quantity', '?')}× {item.get('title') or 'Unnamed item'}"
-        for item in items[:10]
-    ) or "• No item details"
     blocks = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": f"Recovery proposal: {action}"},
         },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Value*\n{snapshot.get('total_price')} {snapshot.get('currency')}"},
-                {"type": "mrkdwn", "text": f"*Items*\n{snapshot.get('item_count')}"},
-            ],
-        },
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Basket*\n{item_text}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reasoning*\n{reason}"}},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Draft*\n*{subject}*\n{body}",
-            },
-        },
         {
             "type": "actions",
             "elements": [
@@ -79,7 +57,7 @@ def post_recovery_decision(decision, snapshot):
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"Dry run • Decision `{decision['decision_id'][:12]}`"}
+                {"type": "mrkdwn", "text": f"Dry run • Decision \`{decision['decision_id'][:12]}\`"}
             ],
         },
     ]
@@ -87,11 +65,7 @@ def post_recovery_decision(decision, snapshot):
         response = requests.post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={
-                "channel": channel,
-                "text": f"Recovery proposal: {action}",
-                "blocks": blocks,
-            },
+            json={"channel": channel, "text": f"Recovery proposal: {action}", "blocks": blocks},
             timeout=(5, 15),
         )
         data = response.json()
