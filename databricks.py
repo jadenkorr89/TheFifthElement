@@ -12,6 +12,7 @@ class DatabricksError(Exception):
 
 _TABLE_READY = False
 _CART_STATE_READY = False
+_DECISIONS_READY = False
 
 
 def _config():
@@ -349,3 +350,120 @@ def count_shopify_events():
     fqn = _config()["fqn"]
     data = execute_statement(f"SELECT COUNT(*) FROM {fqn}")
     return int(data["result"]["data_array"][0][0])
+
+def ensure_recovery_decisions_table():
+    global _DECISIONS_READY
+    if _DECISIONS_READY:
+        return
+    fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_DECISIONS_TABLE", "shopify_recovery_decisions"
+    )
+    execute_statement(
+        f"""
+        CREATE TABLE IF NOT EXISTS {fqn} (
+          decision_id STRING NOT NULL,
+          shop_domain STRING NOT NULL,
+          state_token STRING NOT NULL,
+          decided_at TIMESTAMP NOT NULL,
+          decision_status STRING NOT NULL,
+          recommended_action STRING NOT NULL,
+          reason STRING NOT NULL,
+          message_subject STRING,
+          message_body STRING,
+          model STRING NOT NULL,
+          input_snapshot_json STRING NOT NULL,
+          bloomreach_status STRING NOT NULL
+        ) USING DELTA
+        """
+    )
+    _DECISIONS_READY = True
+
+
+def list_unprocessed_recovery_candidates(limit=5):
+    ensure_cart_state_objects()
+    ensure_recovery_decisions_table()
+    candidates_fqn = _qualified_name(
+        "DATABRICKS_SHOPIFY_CANDIDATES_VIEW", "shopify_abandonment_candidates"
+    )
+    decisions_fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_DECISIONS_TABLE", "shopify_recovery_decisions"
+    )
+    safe_limit = max(1, min(int(limit), 25))
+    data = execute_statement(
+        f"""
+        SELECT
+          c.shop_domain,
+          c.state_token,
+          c.cart_token,
+          c.checkout_token,
+          c.currency,
+          c.total_price,
+          c.item_count,
+          CAST(c.first_seen_at AS STRING),
+          CAST(c.last_seen_at AS STRING),
+          c.latest_topic,
+          c.latest_payload_json
+        FROM {candidates_fqn} AS c
+        LEFT ANTI JOIN {decisions_fqn} AS d
+          ON d.shop_domain = c.shop_domain
+         AND d.state_token = c.state_token
+        ORDER BY c.last_seen_at
+        LIMIT {safe_limit}
+        """
+    )
+    rows = data.get("result", {}).get("data_array", [])
+    keys = [
+        "shop_domain",
+        "state_token",
+        "cart_token",
+        "checkout_token",
+        "currency",
+        "total_price",
+        "item_count",
+        "first_seen_at",
+        "last_seen_at",
+        "latest_topic",
+        "latest_payload_json",
+    ]
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def store_recovery_decision(decision):
+    ensure_recovery_decisions_table()
+    fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_DECISIONS_TABLE", "shopify_recovery_decisions"
+    )
+    execute_statement(
+        f"""
+        MERGE INTO {fqn} AS target
+        USING (
+          SELECT
+            :decision_id AS decision_id,
+            :shop_domain AS shop_domain,
+            :state_token AS state_token,
+            current_timestamp() AS decided_at,
+            'PROPOSED' AS decision_status,
+            :recommended_action AS recommended_action,
+            :reason AS reason,
+            NULLIF(:message_subject, '') AS message_subject,
+            NULLIF(:message_body, '') AS message_body,
+            :model AS model,
+            :input_snapshot_json AS input_snapshot_json,
+            'DISABLED' AS bloomreach_status
+        ) AS source
+        ON target.decision_id = source.decision_id
+        WHEN NOT MATCHED THEN INSERT *
+        """,
+        [
+            _param("decision_id", decision["decision_id"]),
+            _param("shop_domain", decision["shop_domain"]),
+            _param("state_token", decision["state_token"]),
+            _param("recommended_action", decision["recommended_action"]),
+            _param("reason", decision["reason"]),
+            _param("message_subject", decision.get("message_subject")),
+            _param("message_body", decision.get("message_body")),
+            _param("model", decision["model"]),
+            _param("input_snapshot_json", decision["input_snapshot_json"]),
+        ],
+    )
+
