@@ -57,7 +57,7 @@ def post_recovery_decision(decision):
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"Dry run • Decision \`{decision['decision_id'][:12]}\`"}
+                {"type": "mrkdwn", "text": f"Dry run • Decision `{decision['decision_id'][:12]}`"}
             ],
         },
     ]
