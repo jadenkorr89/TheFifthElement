@@ -9,6 +9,7 @@ from google.auth.transport import requests as google_auth_requests
 from google.oauth2 import id_token
 
 from databricks import list_unprocessed_recovery_candidates, store_recovery_decision
+from slack import post_recovery_decision
 
 
 class RecoveryError(Exception):
@@ -140,18 +141,18 @@ def run_recovery_worker():
             decision_id = hashlib.sha256(
                 f"{candidate['shop_domain']}:{candidate['state_token']}".encode()
             ).hexdigest()
-            store_recovery_decision(
-                {
-                    **result,
-                    "decision_id": decision_id,
-                    "shop_domain": candidate["shop_domain"],
-                    "state_token": candidate["state_token"],
-                    "model": model,
-                    "input_snapshot_json": json.dumps(
-                        snapshot, ensure_ascii=False, separators=(",", ":")
-                    ),
-                }
-            )
+            decision = {
+                **result,
+                "decision_id": decision_id,
+                "shop_domain": candidate["shop_domain"],
+                "state_token": candidate["state_token"],
+                "model": model,
+                "input_snapshot_json": json.dumps(
+                    snapshot, ensure_ascii=False, separators=(",", ":")
+                ),
+            }
+            store_recovery_decision(decision)
+            post_recovery_decision(decision)
             processed.append(
                 {
                     "decision_id": decision_id,
