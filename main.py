@@ -8,6 +8,14 @@ import functions_framework
 from google import genai
 from google.genai import types
 from antavo import AntavoError, fetch_rewards
+from databricks import DatabricksError, count_shopify_events, store_shopify_event
+from shopify import (
+    ShopifyWebhookError,
+    decode_pubsub_push,
+    publish_shopify_webhook,
+    verify_pubsub_push,
+    verify_shopify_webhook,
+)
 
 DEFAULT_PROMPT = 'Fetch the configured Antavo rewards and explain what incentives exist, including IDs and restrictions.'
 SYSTEM = '''You help a developer inspect an Antavo reward catalog.
@@ -89,12 +97,46 @@ def run_agent(prompt):
 
 @functions_framework.http
 def rewards_agent(request):
+    path = request.path.rstrip("/") or "/"
+
+    if path == "/webhooks/shopify":
+        if request.method != "POST":
+            return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+        raw_body = request.get_data(cache=True)
+        if not verify_shopify_webhook(
+            raw_body, request.headers.get("X-Shopify-Hmac-Sha256")
+        ):
+            return {"error": "Invalid Shopify signature."}, 401
+        try:
+            message_id = publish_shopify_webhook(raw_body, request.headers)
+        except ShopifyWebhookError as exc:
+            return {"error": str(exc)}, 400
+        except Exception:
+            logging.exception("Could not publish Shopify webhook")
+            return {"error": "Could not queue webhook."}, 503
+        return {"ok": True, "queued": True, "message_id": message_id}, 200
+
+    if path == "/internal/shopify/process":
+        if request.method != "POST":
+            return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+        if not verify_pubsub_push(request):
+            return {"error": "Invalid Pub/Sub identity."}, 401
+        try:
+            event = decode_pubsub_push(request.get_json(silent=True))
+            store_shopify_event(event)
+        except ShopifyWebhookError as exc:
+            return {"error": str(exc)}, 400
+        except DatabricksError:
+            logging.exception("Could not store Shopify event")
+            return {"error": "Could not store Shopify event."}, 503
+        return "", 204
+
     if request.method == 'GET':
         return {
             'ok': True,
             'service': 'the-fifth-element',
             'source': 'github',
-            'deployment_marker': 'github-autodeploy-1',
+            'deployment_marker': 'shopify-pubsub-connector-1',
         }, 200
     if request.method != 'POST':
         return {'error': 'Use GET for health or POST with a JSON object containing prompt.'}, 405, {'Allow': 'GET, POST'}
@@ -120,73 +162,11 @@ def rewards_agent(request):
         }, 502
 
 def test_databricks():
-    import requests
-
-    required = [
-        "DATABRICKS_HOST",
-        "DATABRICKS_TOKEN",
-        "DATABRICKS_WAREHOUSE_ID",
-        "DATABRICKS_CATALOG",
-        "DATABRICKS_SCHEMA",
-    ]
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        return {"error": "Missing configuration", "variables": missing}, 500
-
-    host = os.environ["DATABRICKS_HOST"].rstrip("/")
-
     try:
-        response = requests.post(
-            f"{host}/api/2.0/sql/statements",
-            headers={
-                "Authorization": f"Bearer {os.environ['DATABRICKS_TOKEN']}",
-            },
-            json={
-                "warehouse_id": os.environ["DATABRICKS_WAREHOUSE_ID"],
-                "catalog": os.environ["DATABRICKS_CATALOG"],
-                "schema": os.environ["DATABRICKS_SCHEMA"],
-                "statement": (
-                    "SELECT COUNT(*) AS checkout_count "
-                    "FROM shopify_checkouts"
-                ),
-                "wait_timeout": "50s",
-                "on_wait_timeout": "CANCEL",
-            },
-            timeout=(10, 65),
-            allow_redirects=False,
-        )
-
-        try:
-            data = response.json()
-        except ValueError:
-            return {
-                "error": "Databricks returned a non-JSON response",
-                "http_status": response.status_code,
-            }, 502
-
-        if response.status_code != 200:
-            return {
-                "error": "Databricks API request failed",
-                "http_status": response.status_code,
-                "details": data,
-            }, 502
-
-        status = data.get("status", {})
-        if status.get("state") != "SUCCEEDED":
-            return {
-                "error": "SQL query did not succeed",
-                "status": status,
-                "statement_id": data.get("statement_id"),
-            }, 502
-
         return {
             "ok": True,
-            "checkout_count": int(data["result"]["data_array"][0][0]),
-            "message": "Databricks connection and table read succeeded.",
+            "shopify_event_count": count_shopify_events(),
+            "message": "Databricks connection and Shopify event table succeeded.",
         }, 200
-
-    except requests.RequestException as exc:
-        return {
-            "error": "Could not reach Databricks",
-            "error_type": type(exc).__name__,
-        }, 502
+    except DatabricksError as exc:
+        return {"error": str(exc)}, 502
