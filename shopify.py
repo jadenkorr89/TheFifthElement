@@ -59,7 +59,7 @@ def publish_shopify_webhook(raw_body, headers):
         shop_domain=envelope["shop_domain"],
         shopify_topic=envelope["topic"],
     )
-    return future.result(timeout=5)
+    return future.result(timeout=3)
 
 
 def verify_pubsub_push(request):
