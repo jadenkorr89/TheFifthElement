@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from antavo import AntavoError, fetch_rewards
 from databricks import DatabricksError, count_shopify_events, store_shopify_event
+from recovery import RecoveryError, run_recovery_worker, verify_scheduler_request
 from shopify import (
     ShopifyWebhookError,
     decode_pubsub_push,
@@ -115,6 +116,17 @@ def rewards_agent(request):
             logging.exception("Could not publish Shopify webhook")
             return {"error": "Could not queue webhook."}, 503
         return {"ok": True, "queued": True, "message_id": message_id}, 200
+
+    if path == "/jobs/recovery/run":
+        if request.method != "POST":
+            return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+        if not verify_scheduler_request(request):
+            return {"error": "Invalid scheduler identity."}, 401
+        try:
+            return run_recovery_worker(), 200
+        except (RecoveryError, DatabricksError) as exc:
+            logging.exception("Recovery worker failed")
+            return {"error": str(exc)}, 503
 
     if path == "/internal/shopify/process":
         if request.method != "POST":
