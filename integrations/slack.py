@@ -1,4 +1,4 @@
-"""Slack decision cards and signed feedback transport."""
+"""Slack decision cards, signed interactions, and feedback transport."""
 import base64
 import hashlib
 import hmac

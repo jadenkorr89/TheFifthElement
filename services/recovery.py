@@ -3,13 +3,13 @@ import hashlib
 import json
 import os
 
-from google import genai
 from google.genai import types
-from google.auth.transport import requests as google_auth_requests
-from google.oauth2 import id_token
-
-from databricks import list_unprocessed_recovery_candidates, store_recovery_decision
-from slack import post_recovery_decision
+from integrations.gemini import create_client
+from integrations.databricks import (
+    list_unprocessed_recovery_candidates,
+    store_recovery_decision,
+)
+from integrations.slack import post_recovery_decision
 
 
 class RecoveryError(Exception):
@@ -17,42 +17,6 @@ class RecoveryError(Exception):
 
 
 ALLOWED_ACTIONS = {"NO_ACTION", "REMINDER", "INCENTIVE", "HUMAN_REVIEW"}
-
-
-def verify_scheduler_request(request):
-    audience = os.environ.get("SCHEDULER_AUDIENCE", "")
-    expected_email = os.environ.get("SCHEDULER_SERVICE_ACCOUNT", "")
-    auth = request.headers.get("Authorization", "")
-    if not audience or not expected_email or not auth.startswith("Bearer "):
-        return False
-    try:
-        claims = id_token.verify_oauth2_token(
-            auth[7:], google_auth_requests.Request(), audience=audience
-        )
-    except (ValueError, TypeError):
-        return False
-    return claims.get("email") == expected_email and claims.get("email_verified") is True
-
-
-def _client():
-    backend = os.environ.get("GEMINI_BACKEND", "developer")
-    options = types.HttpOptions(timeout=60000)
-    if backend == "developer":
-        key = os.environ.get("GEMINI_API_KEY")
-        if not key:
-            raise RecoveryError("GEMINI_API_KEY is not configured.")
-        return genai.Client(vertexai=False, api_key=key, http_options=options)
-    if backend == "vertex":
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if not project:
-            raise RecoveryError("GOOGLE_CLOUD_PROJECT is not configured.")
-        return genai.Client(
-            vertexai=True,
-            project=project,
-            location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
-            http_options=options,
-        )
-    raise RecoveryError("GEMINI_BACKEND must be developer or vertex.")
 
 
 def _sanitized_snapshot(candidate):
@@ -134,7 +98,7 @@ def run_recovery_worker():
         limit=int(os.environ.get("RECOVERY_BATCH_SIZE", "5"))
     )
     processed = []
-    with _client() as client:
+    with create_client() as client:
         for candidate in candidates:
             snapshot = _sanitized_snapshot(candidate)
             result = _decide(client, model, snapshot)

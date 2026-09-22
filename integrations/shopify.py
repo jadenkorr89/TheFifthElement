@@ -6,9 +6,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from google.auth.transport import requests as google_auth_requests
 from google.cloud import pubsub_v1
-from google.oauth2 import id_token
 
 
 class ShopifyWebhookError(Exception):
@@ -60,28 +58,6 @@ def publish_shopify_webhook(raw_body, headers):
         shopify_topic=envelope["topic"],
     )
     return future.result(timeout=3)
-
-
-def verify_pubsub_push(request):
-    audience = os.environ.get("PUBSUB_PUSH_AUDIENCE", "")
-    expected_email = os.environ.get("PUBSUB_PUSH_SERVICE_ACCOUNT", "")
-    auth = request.headers.get("Authorization", "")
-    if not audience or not expected_email:
-        raise ShopifyWebhookError(
-            "PUBSUB_PUSH_AUDIENCE and PUBSUB_PUSH_SERVICE_ACCOUNT must be configured."
-        )
-    if not auth.startswith("Bearer "):
-        return False
-    try:
-        claims = id_token.verify_oauth2_token(
-            auth[7:], google_auth_requests.Request(), audience=audience
-        )
-    except (ValueError, TypeError):
-        return False
-    return (
-        claims.get("email") == expected_email
-        and claims.get("email_verified") is True
-    )
 
 
 def decode_pubsub_push(body):

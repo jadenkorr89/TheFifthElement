@@ -1,4 +1,4 @@
-"""Minimal Databricks Statement Execution API client."""
+"""Databricks Statement Execution client and PoC data access layer."""
 import json
 import os
 import re
@@ -549,4 +549,3 @@ def store_recovery_feedback(feedback):
             _param("decision_id", feedback.get("decision_id")),
         ],
     )
-

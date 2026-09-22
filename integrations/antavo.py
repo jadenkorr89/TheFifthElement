@@ -1,4 +1,4 @@
-"""Antavo signing port supplied by Jani; no credentials are stored in source."""
+"""Antavo API signing and reward-catalog client."""
 import hashlib
 import hmac
 import json
