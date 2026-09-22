@@ -89,8 +89,15 @@ def run_agent(prompt):
 
 @functions_framework.http
 def rewards_agent(request):
+    if request.method == 'GET':
+        return {
+            'ok': True,
+            'service': 'the-fifth-element',
+            'source': 'github',
+            'deployment_marker': 'github-autodeploy-1',
+        }, 200
     if request.method != 'POST':
-        return {'error': 'Use POST with a JSON object containing prompt.'}, 405, {'Allow': 'POST'}
+        return {'error': 'Use GET for health or POST with a JSON object containing prompt.'}, 405, {'Allow': 'GET, POST'}
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return {'error': 'Expected a JSON object.'}, 400
