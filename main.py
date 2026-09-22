@@ -148,7 +148,7 @@ def rewards_agent(request):
             'ok': True,
             'service': 'the-fifth-element',
             'source': 'github',
-            'deployment_marker': 'shopify-pubsub-connector-1',
+            'deployment_marker': 'recovery-worker-1',
         }, 200
     if request.method != 'POST':
         return {'error': 'Use GET for health or POST with a JSON object containing prompt.'}, 405, {'Allow': 'GET, POST'}
