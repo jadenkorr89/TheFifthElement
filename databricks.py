@@ -13,6 +13,7 @@ class DatabricksError(Exception):
 _TABLE_READY = False
 _CART_STATE_READY = False
 _DECISIONS_READY = False
+_FEEDBACK_READY = False
 
 
 def _config():
@@ -464,6 +465,88 @@ def store_recovery_decision(decision):
             _param("message_body", decision.get("message_body")),
             _param("model", decision["model"]),
             _param("input_snapshot_json", decision["input_snapshot_json"]),
+        ],
+    )
+
+def ensure_recovery_feedback_table():
+    global _FEEDBACK_READY
+    if _FEEDBACK_READY:
+        return
+    fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_FEEDBACK_TABLE", "shopify_recovery_feedback"
+    )
+    execute_statement(
+        f"""
+        CREATE TABLE IF NOT EXISTS {fqn} (
+          feedback_id STRING NOT NULL,
+          decision_id STRING NOT NULL,
+          feedback STRING NOT NULL,
+          slack_user_id STRING,
+          slack_user_name STRING,
+          slack_channel_id STRING,
+          slack_message_ts STRING,
+          received_at TIMESTAMP NOT NULL,
+          pubsub_message_id STRING
+        ) USING DELTA
+        """
+    )
+    _FEEDBACK_READY = True
+
+
+def store_recovery_feedback(feedback):
+    ensure_recovery_feedback_table()
+    feedback_fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_FEEDBACK_TABLE", "shopify_recovery_feedback"
+    )
+    decisions_fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_DECISIONS_TABLE", "shopify_recovery_decisions"
+    )
+    feedback_id = (
+        str(feedback.get("decision_id", ""))
+        + ":"
+        + str(feedback.get("user_id", ""))
+        + ":"
+        + str(feedback.get("feedback", ""))
+    )
+    execute_statement(
+        f"""
+        MERGE INTO {feedback_fqn} AS target
+        USING (
+          SELECT
+            sha2(:feedback_id, 256) AS feedback_id,
+            :decision_id AS decision_id,
+            :feedback AS feedback,
+            NULLIF(:user_id, '') AS slack_user_id,
+            NULLIF(:user_name, '') AS slack_user_name,
+            NULLIF(:channel_id, '') AS slack_channel_id,
+            NULLIF(:message_ts, '') AS slack_message_ts,
+            CAST(:received_at AS TIMESTAMP) AS received_at,
+            NULLIF(:pubsub_message_id, '') AS pubsub_message_id
+        ) AS source
+        ON target.feedback_id = source.feedback_id
+        WHEN NOT MATCHED THEN INSERT *
+        """,
+        [
+            _param("feedback_id", feedback_id),
+            _param("decision_id", feedback.get("decision_id")),
+            _param("feedback", feedback.get("feedback")),
+            _param("user_id", feedback.get("user_id")),
+            _param("user_name", feedback.get("user_name")),
+            _param("channel_id", feedback.get("channel_id")),
+            _param("message_ts", feedback.get("message_ts")),
+            _param("received_at", feedback.get("received_at")),
+            _param("pubsub_message_id", feedback.get("pubsub_message_id")),
+        ],
+    )
+    execute_statement(
+        f"""
+        UPDATE {decisions_fqn}
+        SET decision_status = :feedback
+        WHERE decision_id = :decision_id
+        """,
+        [
+            _param("feedback", feedback.get("feedback")),
+            _param("decision_id", feedback.get("decision_id")),
         ],
     )
 
