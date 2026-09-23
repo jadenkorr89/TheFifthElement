@@ -1,6 +1,7 @@
 """Scheduled dry-run recovery decision worker."""
 import hashlib
 import json
+import logging
 import os
 
 from google.genai import types
@@ -9,7 +10,7 @@ from integrations.databricks import (
     list_unprocessed_recovery_candidates,
     store_recovery_decision,
 )
-from integrations.slack import post_recovery_decision
+from integrations.slack import post_recovery_decision, post_recovery_failure
 from services.settings import get_recovery_settings
 
 
@@ -57,11 +58,16 @@ def _decide(client, model, snapshot, settings):
         "\n\nSanitized cart:\n"
         + json.dumps(snapshot, ensure_ascii=False)
     )
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+    except Exception as exc:
+        raise RecoveryError(
+            f"Gemini request failed ({type(exc).__name__}): {str(exc)[:800]}"
+        ) from exc
     try:
         result = json.loads(response.text or "")
     except json.JSONDecodeError as exc:
@@ -94,7 +100,33 @@ def run_recovery_worker():
     with create_client() as client:
         for candidate in candidates:
             snapshot = _sanitized_snapshot(candidate)
-            result = _decide(client, model, snapshot, settings)
+            try:
+                result = _decide(client, model, snapshot, settings)
+            except Exception as exc:
+                context = {
+                    "model": model,
+                    "shop_domain": candidate.get("shop_domain"),
+                    "state_token": candidate.get("state_token"),
+                }
+                logging.exception(
+                    "Recovery decision failed for shop=%s state_token=%s model=%s",
+                    context["shop_domain"],
+                    context["state_token"],
+                    model,
+                )
+                try:
+                    post_recovery_failure(str(exc), context)
+                    setattr(exc, "slack_notified", True)
+                except Exception:
+                    logging.exception(
+                        "Could not send recovery failure notification to Slack"
+                    )
+                if isinstance(exc, RecoveryError):
+                    raise
+                raise RecoveryError(
+                    f"Recovery decision failed ({type(exc).__name__}): {str(exc)[:800]}"
+                ) from exc
+
             decision_id = hashlib.sha256(
                 f"{candidate['shop_domain']}:{candidate['state_token']}".encode()
             ).hexdigest()

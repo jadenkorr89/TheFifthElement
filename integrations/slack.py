@@ -142,3 +142,62 @@ def decode_slack_feedback_push(body):
         return feedback
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise SlackError("Invalid Slack feedback Pub/Sub message.") from exc
+
+
+def post_recovery_failure(message, context=None):
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    channel = os.environ.get("SLACK_CHANNEL_ID", "")
+    if not token or not channel:
+        raise SlackError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required.")
+
+    context = context or {}
+    details = []
+    for key in ("model", "shop_domain", "state_token"):
+        value = context.get(key)
+        if value:
+            details.append(f"*{key}:* `{str(value)[:160]}`")
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Recovery worker failed"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Error*\n```{str(message)[:1200]}```",
+            },
+        },
+    ]
+    if details:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n".join(details)},
+            }
+        )
+
+    try:
+        response = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "channel": channel,
+                "text": f"Recovery worker failed: {str(message)[:300]}",
+                "blocks": blocks,
+            },
+            timeout=(5, 15),
+        )
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SlackError("Slack failure notification request failed.") from exc
+    if response.status_code != 200 or not data.get("ok"):
+        raise SlackError(
+            f"Slack rejected the failure notification: "
+            f"{data.get('error', response.status_code)}"
+        )
+    return {"channel": data.get("channel"), "ts": data.get("ts")}
