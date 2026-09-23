@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import time
 
 import requests
 
@@ -95,6 +96,24 @@ def execute_statement(statement, parameters=None):
             "Databricks statement failed: " + json.dumps(status)[:1000]
         )
     return data
+
+
+
+def _execute_delta_write_with_retry(statement, parameters=None, attempts=4):
+    for attempt in range(attempts):
+        try:
+            return execute_statement(statement, parameters)
+        except DatabricksError as exc:
+            message = str(exc)
+            is_conflict = (
+                "DELTA_CONCURRENT_APPEND" in message
+                or "Transaction conflict detected" in message
+                or "concurrent operation modified the same rows" in message.lower()
+            )
+            if not is_conflict or attempt == attempts - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+    raise DatabricksError("Databricks Delta write retry exhausted.")
 
 
 def ensure_shopify_events_table():
@@ -315,7 +334,7 @@ def store_shopify_event(event):
     payload_json = json.dumps(
         event.get("payload"), ensure_ascii=False, separators=(",", ":")
     )
-    execute_statement(
+    _execute_delta_write_with_retry(
         f"""
         MERGE INTO {fqn} AS target
         USING (
@@ -377,7 +396,7 @@ def claim_antavo_delivery(webhook_id, action, attempt_id):
     ensure_antavo_deliveries_table()
     fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
     delivery_key = f"{webhook_id}:{action}"
-    execute_statement(
+    _execute_delta_write_with_retry(
         f"""
         MERGE INTO {fqn} AS target
         USING (
@@ -452,7 +471,7 @@ def claim_antavo_delivery(webhook_id, action, attempt_id):
 def complete_antavo_delivery(webhook_id, action, attempt_id):
     ensure_antavo_deliveries_table()
     fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
-    execute_statement(
+    _execute_delta_write_with_retry(
         f"""
         UPDATE {fqn}
         SET status = 'SENT',
@@ -471,7 +490,7 @@ def complete_antavo_delivery(webhook_id, action, attempt_id):
 def fail_antavo_delivery(webhook_id, action, attempt_id, error):
     ensure_antavo_deliveries_table()
     fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
-    execute_statement(
+    _execute_delta_write_with_retry(
         f"""
         UPDATE {fqn}
         SET status = 'FAILED',
