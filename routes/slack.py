@@ -10,8 +10,11 @@ from integrations.google_cloud import (
 from integrations.slack import (
     SlackError,
     decode_slack_feedback_push,
-    parse_slack_interaction,
+    open_recovery_feedback_modal,
+    parse_recovery_feedback_submission,
+    parse_slack_payload,
     publish_slack_feedback,
+    update_recovery_decision_message,
     verify_slack_request,
 )
 
@@ -19,6 +22,7 @@ from integrations.slack import (
 def receive_slack_interaction(request):
     if request.method != "POST":
         return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
+
     raw_body = request.get_data(cache=True)
     if not verify_slack_request(
         raw_body,
@@ -26,18 +30,24 @@ def receive_slack_interaction(request):
         request.headers.get("X-Slack-Signature"),
     ):
         return {"error": "Invalid Slack signature."}, 401
+
     try:
-        feedback = parse_slack_interaction(raw_body)
-        publish_slack_feedback(feedback)
+        payload = parse_slack_payload(raw_body)
+        payload_type = payload.get("type")
+        if payload_type == "block_actions":
+            open_recovery_feedback_modal(payload)
+            return "", 200
+        if payload_type == "view_submission":
+            feedback = parse_recovery_feedback_submission(payload)
+            publish_slack_feedback(feedback)
+            return "", 200
+        return {"error": "Unsupported Slack interaction."}, 400
     except SlackError as exc:
+        logging.exception("Slack interaction failed")
         return {"error": str(exc)}, 400
     except Exception:
-        logging.exception("Could not queue Slack feedback")
-        return {"error": "Could not queue feedback."}, 503
-    return {
-        "response_type": "ephemeral",
-        "text": f"Feedback recorded: {feedback['feedback']}",
-    }, 200
+        logging.exception("Could not handle Slack interaction")
+        return {"error": "Could not handle Slack interaction."}, 503
 
 
 def process_slack_feedback(request):
@@ -48,8 +58,10 @@ def process_slack_feedback(request):
             return {"error": "Invalid Pub/Sub identity."}, 401
         feedback = decode_slack_feedback_push(request.get_json(silent=True))
         store_recovery_feedback(feedback)
+        update_recovery_decision_message(feedback)
     except SlackError as exc:
-        return {"error": str(exc)}, 400
+        logging.exception("Could not apply Slack feedback")
+        return {"error": str(exc)}, 503
     except GoogleCloudConfigurationError as exc:
         logging.exception("Pub/Sub identity configuration is invalid")
         return {"error": str(exc)}, 503

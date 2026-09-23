@@ -7,8 +7,10 @@ import os
 from google.genai import types
 from integrations.gemini import create_client
 from integrations.databricks import (
+    list_good_recovery_examples,
     list_unprocessed_recovery_candidates,
     store_recovery_decision,
+    update_recovery_decision_slack_message,
 )
 from integrations.slack import post_recovery_decision, post_recovery_failure
 from services.settings import get_recovery_settings
@@ -51,13 +53,18 @@ def _sanitized_snapshot(candidate):
     }
 
 
-def _decide(client, model, snapshot, settings):
+def _decide(client, model, snapshot, settings, good_examples):
     prompt = (
         f"{settings.cart_recovery_main_prompt}\n"
         f"Remaining budget: {settings.cart_recovery_budget}"
-        "\n\nSanitized cart:\n"
-        + json.dumps(snapshot, ensure_ascii=False)
     )
+    if good_examples:
+        prompt += (
+            "\n\nPrevious recovery decisions that received GOOD human feedback. "
+            "Use these as guidance, not hard rules; evaluate the current cart independently:\n"
+            + json.dumps(good_examples, ensure_ascii=False)
+        )
+    prompt += "\n\nSanitized cart:\n" + json.dumps(snapshot, ensure_ascii=False)
     try:
         response = client.models.generate_content(
             model=model,
@@ -93,6 +100,7 @@ def run_recovery_worker():
     if not model:
         raise RecoveryError("GEMINI_MODEL is not configured.")
     settings = get_recovery_settings()
+    good_examples = list_good_recovery_examples()
     candidates = list_unprocessed_recovery_candidates(
         limit=int(os.environ.get("RECOVERY_BATCH_SIZE", "5"))
     )
@@ -101,7 +109,7 @@ def run_recovery_worker():
         for candidate in candidates:
             snapshot = _sanitized_snapshot(candidate)
             try:
-                result = _decide(client, model, snapshot, settings)
+                result = _decide(client, model, snapshot, settings, good_examples)
             except Exception as exc:
                 context = {
                     "model": model,
@@ -141,7 +149,12 @@ def run_recovery_worker():
                 ),
             }
             store_recovery_decision(decision)
-            post_recovery_decision(decision)
+            slack_message = post_recovery_decision(decision)
+            update_recovery_decision_slack_message(
+                decision_id,
+                slack_message.get("channel"),
+                slack_message.get("ts"),
+            )
             processed.append(
                 {
                     "decision_id": decision_id,

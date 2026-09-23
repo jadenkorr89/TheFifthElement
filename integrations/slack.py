@@ -16,11 +16,7 @@ class SlackError(Exception):
     pass
 
 
-def post_recovery_decision(decision):
-    token = os.environ.get("SLACK_BOT_TOKEN", "")
-    channel = os.environ.get("SLACK_CHANNEL_ID", "")
-    if not token or not channel:
-        raise SlackError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required.")
+def _decision_blocks(decision, feedback=None):
     action = decision["recommended_action"]
     reason = decision["reason"]
     blocks = [
@@ -29,38 +25,63 @@ def post_recovery_decision(decision):
             "text": {"type": "plain_text", "text": f"Recovery proposal: {action}"},
         },
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reasoning*\n{reason}"}},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "recovery_approve",
-                    "text": {"type": "plain_text", "text": "Approve"},
-                    "style": "primary",
-                    "value": decision["decision_id"],
-                },
-                {
-                    "type": "button",
-                    "action_id": "recovery_reject",
-                    "text": {"type": "plain_text", "text": "Reject"},
-                    "style": "danger",
-                    "value": decision["decision_id"],
-                },
-                {
-                    "type": "button",
-                    "action_id": "recovery_needs_work",
-                    "text": {"type": "plain_text", "text": "Needs work"},
-                    "value": decision["decision_id"],
-                },
-            ],
-        },
+    ]
+    if feedback:
+        rating = feedback.get("rating", "")
+        text = feedback.get("text", "")
+        user_name = feedback.get("user_name", "")
+        summary = f"*Feedback:* {rating}"
+        if user_name:
+            summary += f" — {user_name}"
+        if text:
+            summary += f"\n{text}"
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": summary}}
+        )
+    else:
+        button_value = json.dumps(
+            {
+                "decision_id": decision["decision_id"],
+                "recommended_action": action,
+                "reason": reason,
+            },
+            separators=(",", ":"),
+        )
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "recovery_feedback_open",
+                        "text": {"type": "plain_text", "text": "Give feedback"},
+                        "style": "primary",
+                        "value": button_value,
+                    }
+                ],
+            }
+        )
+    blocks.append(
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"Dry run • Decision `{decision['decision_id'][:12]}`"}
+                {
+                    "type": "mrkdwn",
+                    "text": f"Dry run • Decision `{decision['decision_id'][:12]}`",
+                }
             ],
-        },
-    ]
+        }
+    )
+    return blocks
+
+
+def post_recovery_decision(decision):
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    channel = os.environ.get("SLACK_CHANNEL_ID", "")
+    if not token or not channel:
+        raise SlackError("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are required.")
+    action = decision["recommended_action"]
+    blocks = _decision_blocks(decision)
     try:
         response = requests.post(
             "https://slack.com/api/chat.postMessage",
@@ -92,31 +113,193 @@ def verify_slack_request(raw_body, timestamp, signature):
     return hmac.compare_digest(expected, signature)
 
 
-def parse_slack_interaction(raw_body):
+def parse_slack_payload(raw_body):
     try:
         form = parse_qs(raw_body.decode("utf-8"), strict_parsing=True)
         payload = json.loads(form["payload"][0])
-        action = payload["actions"][0]
     except (UnicodeDecodeError, ValueError, KeyError, IndexError, TypeError) as exc:
         raise SlackError("Invalid Slack interaction payload.") from exc
-    mapping = {
-        "recovery_approve": "APPROVED",
-        "recovery_reject": "REJECTED",
-        "recovery_needs_work": "NEEDS_WORK",
+    if not isinstance(payload, dict):
+        raise SlackError("Invalid Slack interaction payload.")
+    return payload
+
+
+def open_recovery_feedback_modal(payload):
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        raise SlackError("SLACK_BOT_TOKEN is required.")
+    try:
+        action = payload["actions"][0]
+        if action.get("action_id") != "recovery_feedback_open":
+            raise SlackError("Unsupported Slack action.")
+        decision = json.loads(action.get("value") or "{}")
+        decision_id = decision["decision_id"]
+        recommended_action = decision["recommended_action"]
+        reason = decision["reason"]
+        trigger_id = payload["trigger_id"]
+        channel_id = payload["channel"]["id"]
+        message_ts = payload["message"]["ts"]
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SlackError("Invalid recovery feedback action.") from exc
+
+    private_metadata = json.dumps(
+        {
+            "decision_id": decision_id,
+            "recommended_action": recommended_action,
+            "reason": reason,
+            "channel_id": channel_id,
+            "message_ts": message_ts,
+        },
+        separators=(",", ":"),
+    )
+    view = {
+        "type": "modal",
+        "callback_id": "recovery_feedback_submit",
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Recovery feedback"},
+        "submit": {"type": "plain_text", "text": "Submit"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*AI choice:* {recommended_action}\n"
+                        f"*Reasoning:* {reason}"
+                    ),
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "feedback_rating",
+                "label": {"type": "plain_text", "text": "Decision quality"},
+                "element": {
+                    "type": "radio_buttons",
+                    "action_id": "rating",
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "GOOD"},
+                            "value": "GOOD",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "BAD"},
+                            "value": "BAD",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "feedback_text",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Further feedback"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "text",
+                    "multiline": True,
+                    "max_length": 1500,
+                },
+            },
+        ],
     }
-    feedback = mapping.get(action.get("action_id"))
-    if not feedback:
-        raise SlackError("Unsupported Slack action.")
+    try:
+        response = requests.post(
+            "https://slack.com/api/views.open",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"trigger_id": trigger_id, "view": view},
+            timeout=(5, 15),
+        )
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SlackError("Slack modal request failed.") from exc
+    if response.status_code != 200 or not data.get("ok"):
+        raise SlackError(
+            f"Slack rejected the modal: {data.get('error', response.status_code)}"
+        )
+    return True
+
+
+def parse_recovery_feedback_submission(payload):
+    try:
+        if payload.get("type") != "view_submission":
+            raise SlackError("Unsupported Slack interaction type.")
+        view = payload["view"]
+        if view.get("callback_id") != "recovery_feedback_submit":
+            raise SlackError("Unsupported Slack modal submission.")
+        metadata = json.loads(view.get("private_metadata") or "{}")
+        values = view["state"]["values"]
+        rating = values["feedback_rating"]["rating"]["selected_option"]["value"]
+        feedback_text = values["feedback_text"]["text"].get("value") or ""
+        user = payload.get("user", {})
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SlackError("Invalid recovery feedback submission.") from exc
+
+    if rating not in {"GOOD", "BAD"}:
+        raise SlackError("Feedback rating must be GOOD or BAD.")
     return {
-        "decision_id": action.get("value", ""),
-        "feedback": feedback,
-        "user_id": payload.get("user", {}).get("id", ""),
-        "user_name": payload.get("user", {}).get("username")
-        or payload.get("user", {}).get("name", ""),
-        "channel_id": payload.get("channel", {}).get("id", ""),
-        "message_ts": payload.get("message", {}).get("ts", ""),
+        "decision_id": metadata.get("decision_id", ""),
+        "recommended_action": metadata.get("recommended_action", ""),
+        "reason": metadata.get("reason", ""),
+        "rating": rating,
+        "feedback_text": feedback_text.strip()[:1500],
+        "user_id": user.get("id", ""),
+        "user_name": user.get("username") or user.get("name", ""),
+        "channel_id": metadata.get("channel_id", ""),
+        "message_ts": metadata.get("message_ts", ""),
         "received_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def update_recovery_decision_message(feedback):
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        raise SlackError("SLACK_BOT_TOKEN is required.")
+    channel = feedback.get("channel_id", "")
+    ts = feedback.get("message_ts", "")
+    if not channel or not ts:
+        raise SlackError("Slack message location is missing from feedback.")
+
+    decision = {
+        "decision_id": feedback["decision_id"],
+        "recommended_action": feedback.get("recommended_action", ""),
+        "reason": feedback.get("reason", ""),
+    }
+    blocks = _decision_blocks(
+        decision,
+        {
+            "rating": feedback.get("rating", ""),
+            "text": feedback.get("feedback_text", ""),
+            "user_name": feedback.get("user_name", ""),
+        },
+    )
+    try:
+        response = requests.post(
+            "https://slack.com/api/chat.update",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "channel": channel,
+                "ts": ts,
+                "text": f"Recovery proposal: {decision['recommended_action']}",
+                "blocks": blocks,
+            },
+            timeout=(5, 15),
+        )
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SlackError("Slack message update failed.") from exc
+    if response.status_code != 200 or not data.get("ok"):
+        raise SlackError(
+            f"Slack rejected the message update: "
+            f"{data.get('error', response.status_code)}"
+        )
+    return True
 
 
 def publish_slack_feedback(feedback):
@@ -129,7 +312,7 @@ def publish_slack_feedback(feedback):
         publisher.topic_path(project, topic_id),
         json.dumps(feedback, separators=(",", ":")).encode(),
         decision_id=feedback["decision_id"],
-        feedback=feedback["feedback"],
+        feedback_rating=feedback["rating"],
     )
     return future.result(timeout=3)
 
