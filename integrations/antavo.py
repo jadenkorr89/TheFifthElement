@@ -135,3 +135,14 @@ def send_opt_in(customer_id, email="", first_name="", last_name=""):
             "last_name": last_name or "",
         },
     )
+
+
+def send_checkout(customer_id, transaction_id, total, items, currency=None):
+    data = {
+        "transaction_id": str(transaction_id),
+        "total": float(total),
+        "items": items,
+    }
+    if currency:
+        data["currency"] = str(currency)
+    return send_event(customer_id, "checkout", data)
