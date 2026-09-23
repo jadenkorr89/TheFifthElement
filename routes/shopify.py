@@ -2,6 +2,7 @@
 
 import logging
 
+from integrations.antavo import AntavoError, send_opt_in
 from integrations.databricks import DatabricksError, store_shopify_event
 from integrations.google_cloud import (
     GoogleCloudConfigurationError,
@@ -33,6 +34,22 @@ def receive_shopify_webhook(request):
     return {"ok": True, "queued": True, "message_id": message_id}, 200
 
 
+def _send_customer_created_opt_in(event):
+    if event.get("topic") != "customers/create":
+        return
+
+    customer = event.get("payload")
+    if not isinstance(customer, dict):
+        raise ShopifyWebhookError("Shopify customer payload is invalid.")
+
+    send_opt_in(
+        customer.get("id"),
+        email=customer.get("email", ""),
+        first_name=customer.get("first_name", ""),
+        last_name=customer.get("last_name", ""),
+    )
+
+
 def process_shopify_event(request):
     if request.method != "POST":
         return {"error": "Method not allowed."}, 405, {"Allow": "POST"}
@@ -41,6 +58,7 @@ def process_shopify_event(request):
             return {"error": "Invalid Pub/Sub identity."}, 401
         event = decode_pubsub_push(request.get_json(silent=True))
         store_shopify_event(event)
+        _send_customer_created_opt_in(event)
     except ShopifyWebhookError as exc:
         return {"error": str(exc)}, 400
     except GoogleCloudConfigurationError as exc:
@@ -49,4 +67,7 @@ def process_shopify_event(request):
     except DatabricksError:
         logging.exception("Could not store Shopify event")
         return {"error": "Could not store Shopify event."}, 503
+    except AntavoError:
+        logging.exception("Could not send Shopify customer opt-in to Antavo")
+        return {"error": "Could not send Antavo opt-in event."}, 503
     return "", 204
