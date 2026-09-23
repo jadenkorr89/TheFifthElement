@@ -13,6 +13,7 @@ from services.recovery import (
     RecoveryError,
     run_recovery_worker,
 )
+from services.settings import SettingsError
 
 
 def run_recovery_job(request):
@@ -24,6 +25,7 @@ def run_recovery_job(request):
         return run_recovery_worker(), 200
     except (
         RecoveryError,
+        SettingsError,
         DatabricksError,
         SlackError,
         GoogleCloudConfigurationError,

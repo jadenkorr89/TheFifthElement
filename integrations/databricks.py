@@ -14,6 +14,7 @@ _TABLE_READY = False
 _CART_STATE_READY = False
 _DECISIONS_READY = False
 _FEEDBACK_READY = False
+_SETTINGS_READY = False
 
 
 def _config():
@@ -345,6 +346,68 @@ def store_shopify_event(event):
         ],
     )
     project_shopify_event(event)
+
+
+def ensure_settings_table(defaults):
+    global _SETTINGS_READY
+    if _SETTINGS_READY:
+        return
+
+    fqn = _qualified_name("DATABRICKS_SETTINGS_TABLE", "settings")
+    execute_statement(
+        f"""
+        CREATE TABLE IF NOT EXISTS {fqn} (
+          setting_key STRING NOT NULL,
+          setting_type STRING NOT NULL,
+          setting_value STRING NOT NULL,
+          updated_at TIMESTAMP NOT NULL
+        ) USING DELTA
+        """
+    )
+
+    for setting_key, setting in defaults.items():
+        execute_statement(
+            f"""
+            MERGE INTO {fqn} AS target
+            USING (
+              SELECT
+                :setting_key AS setting_key,
+                :setting_type AS setting_type,
+                :setting_value AS setting_value,
+                current_timestamp() AS updated_at
+            ) AS source
+            ON target.setting_key = source.setting_key
+            WHEN NOT MATCHED THEN INSERT *
+            """,
+            [
+                _param("setting_key", setting_key),
+                _param("setting_type", setting["type"]),
+                _param("setting_value", setting["value"]),
+            ],
+        )
+
+    _SETTINGS_READY = True
+
+
+def load_settings(defaults):
+    ensure_settings_table(defaults)
+    fqn = _qualified_name("DATABRICKS_SETTINGS_TABLE", "settings")
+    data = execute_statement(
+        f"""
+        SELECT setting_key, setting_type, setting_value
+        FROM {fqn}
+        """
+    )
+    rows = data.get("result", {}).get("data_array", [])
+    return {
+        str(row[0]): {
+            "type": str(row[1]),
+            "value": "" if row[2] is None else str(row[2]),
+        }
+        for row in rows
+        if len(row) >= 3
+    }
+
 
 def count_shopify_events():
     ensure_shopify_events_table()

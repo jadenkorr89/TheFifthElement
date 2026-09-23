@@ -10,6 +10,7 @@ from integrations.databricks import (
     store_recovery_decision,
 )
 from integrations.slack import post_recovery_decision
+from services.settings import get_recovery_settings
 
 
 class RecoveryError(Exception):
@@ -49,22 +50,13 @@ def _sanitized_snapshot(candidate):
     }
 
 
-def _decide(client, model, snapshot):
-    prompt = """Evaluate one abandoned ecommerce checkout for a dry-run PoC.
-Return only a JSON object with four string fields:
-recommended_action, reason, message_subject, message_body.
-
-recommended_action must be exactly one of NO_ACTION, REMINDER, INCENTIVE,
-or HUMAN_REVIEW.
-
-Do not invent discounts, coupon codes, reward values, stock, urgency, or
-customer facts. INCENTIVE only means a verified incentive should be considered
-later. Prefer REMINDER for an ordinary cart. Use HUMAN_REVIEW for malformed or
-contradictory input. Use {{ recovery_url }} as the link placeholder. Nothing is
-being sent. Keep reason under 300 characters, subject under 120, body under 800.
-
-Sanitized cart:
-""" + json.dumps(snapshot, ensure_ascii=False)
+def _decide(client, model, snapshot, settings):
+    prompt = (
+        f"{settings.cart_recovery_main_prompt}\n"
+        f"Remaining budget: {settings.cart_recovery_budget}"
+        "\n\nSanitized cart:\n"
+        + json.dumps(snapshot, ensure_ascii=False)
+    )
     response = client.models.generate_content(
         model=model,
         contents=prompt,
@@ -94,6 +86,7 @@ def run_recovery_worker():
     model = os.environ.get("GEMINI_MODEL")
     if not model:
         raise RecoveryError("GEMINI_MODEL is not configured.")
+    settings = get_recovery_settings()
     candidates = list_unprocessed_recovery_candidates(
         limit=int(os.environ.get("RECOVERY_BATCH_SIZE", "5"))
     )
@@ -101,7 +94,7 @@ def run_recovery_worker():
     with create_client() as client:
         for candidate in candidates:
             snapshot = _sanitized_snapshot(candidate)
-            result = _decide(client, model, snapshot)
+            result = _decide(client, model, snapshot, settings)
             decision_id = hashlib.sha256(
                 f"{candidate['shop_domain']}:{candidate['state_token']}".encode()
             ).hexdigest()

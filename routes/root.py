@@ -13,7 +13,7 @@ def handle_root(request):
             "ok": True,
             "service": "the-fifth-element",
             "source": "github",
-            "deployment_marker": "structured-layout-1",
+            "deployment_marker": "databricks-runtime-settings-1",
         }, 200
     if request.method != "POST":
         return {
