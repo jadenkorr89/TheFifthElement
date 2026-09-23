@@ -13,6 +13,13 @@ class AntavoError(Exception):
     pass
 
 
+class AntavoAlreadyApplied(AntavoError):
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+        super().__init__(f"Antavo event already applied ({code}): {message}")
+
+
 def _antavo_date():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -89,6 +96,19 @@ def _request(method, uri, payload=None):
         raise AntavoError("Antavo connection failed or timed out.") from None
 
     if not 200 <= response.status_code < 300:
+        error_code = None
+        error_message = ""
+        try:
+            error_payload = response.json()
+            error = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
+            error_code = error.get("code")
+            error_message = str(error.get("message") or "")
+        except ValueError:
+            pass
+
+        if error_code in {5003, 112101}:
+            raise AntavoAlreadyApplied(error_code, error_message)
+
         safe_detail = response.text.strip().replace("\n", " ")[:800]
         detail = f" Response: {safe_detail}" if safe_detail else ""
         raise AntavoError(

@@ -4,7 +4,12 @@ import logging
 import uuid
 from decimal import Decimal, InvalidOperation
 
-from integrations.antavo import AntavoError, send_checkout, send_opt_in
+from integrations.antavo import (
+    AntavoAlreadyApplied,
+    AntavoError,
+    send_checkout,
+    send_opt_in,
+)
 from integrations.databricks import (
     DatabricksError,
     claim_antavo_delivery,
@@ -68,6 +73,15 @@ def _run_antavo_once(event, action, callback):
 
     try:
         callback()
+    except AntavoAlreadyApplied as exc:
+        logging.info(
+            "Treating duplicate Antavo event as success webhook_id=%s action=%s code=%s",
+            webhook_id,
+            action,
+            exc.code,
+        )
+        complete_antavo_delivery(webhook_id, action, attempt_id)
+        return
     except Exception as exc:
         try:
             fail_antavo_delivery(webhook_id, action, attempt_id, exc)

@@ -13,7 +13,7 @@ def handle_root(request):
             "ok": True,
             "service": "the-fifth-element",
             "source": "github",
-            "deployment_marker": "antavo-idempotency-1",
+            "deployment_marker": "antavo-duplicate-ack-1",
         }, 200
     if request.method != "POST":
         return {
