@@ -1,10 +1,17 @@
 """Shopify webhook and internal Pub/Sub HTTP handlers."""
 
 import logging
+import uuid
 from decimal import Decimal, InvalidOperation
 
 from integrations.antavo import AntavoError, send_checkout, send_opt_in
-from integrations.databricks import DatabricksError, store_shopify_event
+from integrations.databricks import (
+    DatabricksError,
+    claim_antavo_delivery,
+    complete_antavo_delivery,
+    fail_antavo_delivery,
+    store_shopify_event,
+)
 from integrations.google_cloud import (
     GoogleCloudConfigurationError,
     verify_pubsub_push,
@@ -35,6 +42,45 @@ def receive_shopify_webhook(request):
     return {"ok": True, "queued": True, "message_id": message_id}, 200
 
 
+
+class AntavoDeliveryBusy(Exception):
+    pass
+
+
+def _run_antavo_once(event, action, callback):
+    webhook_id = str(event.get("webhook_id") or "")
+    if not webhook_id:
+        raise ShopifyWebhookError("Shopify webhook id is missing.")
+
+    attempt_id = uuid.uuid4().hex
+    claim = claim_antavo_delivery(webhook_id, action, attempt_id)
+    if claim == "SENT":
+        logging.info(
+            "Skipping duplicate Antavo delivery webhook_id=%s action=%s",
+            webhook_id,
+            action,
+        )
+        return
+    if claim == "BUSY":
+        raise AntavoDeliveryBusy(
+            f"Antavo delivery already in progress for {webhook_id}:{action}."
+        )
+
+    try:
+        callback()
+    except Exception as exc:
+        try:
+            fail_antavo_delivery(webhook_id, action, attempt_id, exc)
+        except Exception:
+            logging.exception(
+                "Could not mark Antavo delivery failed webhook_id=%s action=%s",
+                webhook_id,
+                action,
+            )
+        raise
+    complete_antavo_delivery(webhook_id, action, attempt_id)
+
+
 def _send_customer_created_opt_in(event):
     if event.get("topic") != "customers/create":
         return
@@ -43,11 +89,15 @@ def _send_customer_created_opt_in(event):
     if not isinstance(customer, dict):
         raise ShopifyWebhookError("Shopify customer payload is invalid.")
 
-    send_opt_in(
-        customer.get("id"),
-        email=customer.get("email", ""),
-        first_name=customer.get("first_name", ""),
-        last_name=customer.get("last_name", ""),
+    _run_antavo_once(
+        event,
+        "opt_in",
+        lambda: send_opt_in(
+            customer.get("id"),
+            email=customer.get("email", ""),
+            first_name=customer.get("first_name", ""),
+            last_name=customer.get("last_name", ""),
+        ),
     )
 
 
@@ -113,12 +163,16 @@ def _send_order_created_checkout(event):
         raise ShopifyWebhookError("Shopify order contains no usable line items.")
 
     total = _to_decimal(order.get("total_price"), "total_price")
-    send_checkout(
-        customer_id=customer_id,
-        transaction_id=order_id,
-        total=total,
-        items=items,
-        currency=order.get("currency"),
+    _run_antavo_once(
+        event,
+        "checkout",
+        lambda: send_checkout(
+            customer_id=customer_id,
+            transaction_id=order_id,
+            total=total,
+            items=items,
+            currency=order.get("currency"),
+        ),
     )
 
 
@@ -140,7 +194,10 @@ def process_shopify_event(request):
     except DatabricksError:
         logging.exception("Could not store Shopify event")
         return {"error": "Could not store Shopify event."}, 503
-    except AntavoError:
+    except AntavoDeliveryBusy as exc:
+        logging.warning("%s", exc)
+        return {"error": str(exc), "retryable": True}, 503
+    except AntavoError as exc:
         logging.exception("Could not forward Shopify event to Antavo")
-        return {"error": "Could not forward Shopify event to Antavo."}, 503
+        return {"error": str(exc), "retryable": True}, 503
     return "", 204

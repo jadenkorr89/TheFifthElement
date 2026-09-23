@@ -15,6 +15,7 @@ _CART_STATE_READY = False
 _DECISIONS_READY = False
 _FEEDBACK_READY = False
 _SETTINGS_READY = False
+_ANTAVO_DELIVERIES_READY = False
 
 
 def _config():
@@ -346,6 +347,145 @@ def store_shopify_event(event):
         ],
     )
     project_shopify_event(event)
+
+
+
+def ensure_antavo_deliveries_table():
+    global _ANTAVO_DELIVERIES_READY
+    if _ANTAVO_DELIVERIES_READY:
+        return
+    fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
+    execute_statement(
+        f"""
+        CREATE TABLE IF NOT EXISTS {fqn} (
+          delivery_key STRING NOT NULL,
+          webhook_id STRING NOT NULL,
+          action STRING NOT NULL,
+          status STRING NOT NULL,
+          attempt_id STRING,
+          attempts BIGINT NOT NULL,
+          last_error STRING,
+          created_at TIMESTAMP NOT NULL,
+          updated_at TIMESTAMP NOT NULL
+        ) USING DELTA
+        """
+    )
+    _ANTAVO_DELIVERIES_READY = True
+
+
+def claim_antavo_delivery(webhook_id, action, attempt_id):
+    ensure_antavo_deliveries_table()
+    fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
+    delivery_key = f"{webhook_id}:{action}"
+    execute_statement(
+        f"""
+        MERGE INTO {fqn} AS target
+        USING (
+          SELECT
+            :delivery_key AS delivery_key,
+            :webhook_id AS webhook_id,
+            :action AS action,
+            :attempt_id AS attempt_id
+        ) AS source
+        ON target.delivery_key = source.delivery_key
+        WHEN MATCHED AND (
+          target.status = 'FAILED'
+          OR (
+            target.status = 'PENDING'
+            AND target.updated_at < current_timestamp() - INTERVAL 2 MINUTES
+          )
+        ) THEN UPDATE SET
+          status = 'PENDING',
+          attempt_id = source.attempt_id,
+          attempts = target.attempts + 1,
+          last_error = NULL,
+          updated_at = current_timestamp()
+        WHEN NOT MATCHED THEN INSERT (
+          delivery_key,
+          webhook_id,
+          action,
+          status,
+          attempt_id,
+          attempts,
+          last_error,
+          created_at,
+          updated_at
+        ) VALUES (
+          source.delivery_key,
+          source.webhook_id,
+          source.action,
+          'PENDING',
+          source.attempt_id,
+          1,
+          NULL,
+          current_timestamp(),
+          current_timestamp()
+        )
+        """,
+        [
+            _param("delivery_key", delivery_key),
+            _param("webhook_id", webhook_id),
+            _param("action", action),
+            _param("attempt_id", attempt_id),
+        ],
+    )
+    data = execute_statement(
+        f"""
+        SELECT status, attempt_id
+        FROM {fqn}
+        WHERE delivery_key = :delivery_key
+        LIMIT 1
+        """,
+        [_param("delivery_key", delivery_key)],
+    )
+    rows = data.get("result", {}).get("data_array", [])
+    if not rows:
+        raise DatabricksError("Could not read Antavo delivery claim.")
+    status, stored_attempt_id = rows[0][0], rows[0][1]
+    if status == "SENT":
+        return "SENT"
+    if status == "PENDING" and stored_attempt_id == attempt_id:
+        return "CLAIMED"
+    return "BUSY"
+
+
+def complete_antavo_delivery(webhook_id, action, attempt_id):
+    ensure_antavo_deliveries_table()
+    fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
+    execute_statement(
+        f"""
+        UPDATE {fqn}
+        SET status = 'SENT',
+            last_error = NULL,
+            updated_at = current_timestamp()
+        WHERE delivery_key = :delivery_key
+          AND attempt_id = :attempt_id
+        """,
+        [
+            _param("delivery_key", f"{webhook_id}:{action}"),
+            _param("attempt_id", attempt_id),
+        ],
+    )
+
+
+def fail_antavo_delivery(webhook_id, action, attempt_id, error):
+    ensure_antavo_deliveries_table()
+    fqn = _qualified_name("DATABRICKS_ANTAVO_DELIVERIES_TABLE", "antavo_deliveries")
+    execute_statement(
+        f"""
+        UPDATE {fqn}
+        SET status = 'FAILED',
+            last_error = :last_error,
+            updated_at = current_timestamp()
+        WHERE delivery_key = :delivery_key
+          AND attempt_id = :attempt_id
+        """,
+        [
+            _param("delivery_key", f"{webhook_id}:{action}"),
+            _param("attempt_id", attempt_id),
+            _param("last_error", str(error)[:1500]),
+        ],
+    )
 
 
 def ensure_settings_table(defaults):

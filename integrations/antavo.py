@@ -89,9 +89,10 @@ def _request(method, uri, payload=None):
         raise AntavoError("Antavo connection failed or timed out.") from None
 
     if not 200 <= response.status_code < 300:
+        safe_detail = response.text.strip().replace("\n", " ")[:800]
+        detail = f" Response: {safe_detail}" if safe_detail else ""
         raise AntavoError(
-            f"Antavo returned HTTP {response.status_code}. "
-            "Check endpoint access, payload and signing credentials."
+            f"Antavo returned HTTP {response.status_code}.{detail}"
         )
     if not response.content:
         return {}
