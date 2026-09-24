@@ -157,17 +157,17 @@ def customer_give_reward(customer_id, reward_id, points=None):
     return _request("POST", uri, body)
 
 
-AI_ACTIONS = frozenset({"save_message", "give_points", "double_points"})
+AI_ACTIONS = frozenset({"prime_message", "give_points", "double_points"})
 
 
 def customer_custom_action(customer_id, ai_action, ai_message="", ai_points=0):
     customer = _customer_id(customer_id)
     if ai_action not in AI_ACTIONS:
-        raise AntavoError("ai_action must be save_message, give_points or double_points.")
+        raise AntavoError("ai_action must be prime_message, give_points or double_points.")
     if not isinstance(ai_message, str) or len(ai_message) > 4000:
         raise AntavoError("ai_message must be text of at most 4000 characters.")
-    if ai_action == "save_message" and not ai_message.strip():
-        raise AntavoError("save_message requires a nonempty ai_message.")
+    if ai_action == "prime_message" and not ai_message.strip():
+        raise AntavoError("prime_message requires a nonempty ai_message.")
     if isinstance(ai_points, bool) or not isinstance(ai_points, int) or ai_points < 0:
         raise AntavoError("ai_points must be a nonnegative integer.")
     if ai_action == "give_points" and ai_points == 0:
