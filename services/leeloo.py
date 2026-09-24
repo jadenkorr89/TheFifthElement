@@ -122,7 +122,7 @@ async def _run(prompt):
                     parameters_json_schema={
                         "type": "object", "properties": {
                             "customer_id": {"type": "string"},
-                            "ai_action": {"type": "string", "enum": ["save_message", "give_points", "double_points"]},
+                            "ai_action": {"type": "string", "enum": ["prime_message", "give_points", "double_points"]},
                             "ai_message": {"type": "string"},
                             "ai_points": {"type": "integer"},
                         }, "required": ["customer_id", "ai_action"],
