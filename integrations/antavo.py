@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -128,6 +129,55 @@ def _request(method, uri, payload=None):
 def fetch_rewards():
     # Preserve the actual envelope: the docs show an object despite describing a list.
     return _request("GET", "/entities/rewards/reward")
+
+
+def _customer_id(value):
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value or "")):
+        raise AntavoError("customer_id must be a Shopify numeric customer ID.")
+    return str(value)
+
+
+def _reward_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._~-]+", value):
+        raise AntavoError("reward_id contains unsupported characters.")
+    return value
+
+
+def customer_get(customer_id):
+    return _request("GET", f"/customers/{_customer_id(customer_id)}")
+
+
+def customer_give_reward(customer_id, reward_id, points=None):
+    uri = f"/customers/{_customer_id(customer_id)}/activities/rewards/{_reward_id(reward_id)}/claim"
+    body = {}
+    if points is not None:
+        if isinstance(points, bool) or not isinstance(points, (int, float)) or not math.isfinite(points) or points < 0:
+            raise AntavoError("points must be a nonnegative finite number.")
+        body["points"] = points
+    return _request("POST", uri, body)
+
+
+AI_ACTIONS = frozenset({"save_message", "give_points", "double_points"})
+
+
+def customer_custom_action(customer_id, ai_action, ai_message="", ai_points=0):
+    customer = _customer_id(customer_id)
+    if ai_action not in AI_ACTIONS:
+        raise AntavoError("ai_action must be save_message, give_points or double_points.")
+    if not isinstance(ai_message, str) or len(ai_message) > 4000:
+        raise AntavoError("ai_message must be text of at most 4000 characters.")
+    if ai_action == "save_message" and not ai_message.strip():
+        raise AntavoError("save_message requires a nonempty ai_message.")
+    if isinstance(ai_points, bool) or not isinstance(ai_points, int) or ai_points < 0:
+        raise AntavoError("ai_points must be a nonnegative integer.")
+    if ai_action == "give_points" and ai_points == 0:
+        raise AntavoError("give_points requires a positive ai_points value.")
+    return _request(
+        "POST", "/events",
+        {"customer": customer, "action": "ai_action", "data": {
+            "ai_action": ai_action, "ai_message": ai_message, "ai_points": ai_points,
+        }},
+    )
 
 
 def send_event(customer, action, data):

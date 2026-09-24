@@ -48,3 +48,11 @@ Leeloo also has `search_web` (Gemini Google Search grounding) and
 `read_web_page` (Gemini URL Context). Both use the configured `GEMINI_MODEL`
 and `GEMINI_BACKEND`. They provide sourced web research but do not guarantee
 that a result is a direct, publicly fetchable image URL for `upload_image`.
+
+Leeloo has three customer tools backed by the existing signed Antavo API
+credentials (`ANTAVO_STACK`, `ANTAVO_API_KEY`, `ANTAVO_API_SECRET`):
+`customer_get(customer_id)`, `customer_give_reward(customer_id, reward_id, points?)`,
+and `customer_custom_action(customer_id, ai_action, ai_message?, ai_points?)`.
+Customer IDs are numeric Shopify IDs. The custom action records an `ai_action`
+event; acceptance of the event alone does not confirm any later email or points
+processing.
