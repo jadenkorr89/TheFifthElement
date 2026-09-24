@@ -43,3 +43,8 @@ memory and is never stored in Databricks. Cloud Run instances cache independentl
 whose server annotations set `readOnlyHint: true`. To authorize additional tools,
 set `ANTAVO_MCP_ALLOWED_TOOLS` to a comma-separated list of exact MCP tool names.
 Those tools may change Antavo data, so only add names you intend Leeloo to call.
+
+Leeloo also has `search_web` (Gemini Google Search grounding) and
+`read_web_page` (Gemini URL Context). Both use the configured `GEMINI_MODEL`
+and `GEMINI_BACKEND`. They provide sourced web research but do not guarantee
+that a result is a direct, publicly fetchable image URL for `upload_image`.
