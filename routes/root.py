@@ -4,7 +4,7 @@ import logging
 
 from integrations.databricks import DatabricksError, count_shopify_events
 from integrations.gemini import GeminiConfigurationError
-from services.rewards import DEFAULT_PROMPT, run_rewards_agent
+from services.leeloo import DEFAULT_PROMPT, LeelooError, run_leeloo
 
 
 def handle_root(request):
@@ -32,8 +32,8 @@ def handle_root(request):
             "error": "prompt must be a nonempty string of at most 10000 characters."
         }, 400
     try:
-        return run_rewards_agent(prompt)
-    except (ValueError, GeminiConfigurationError) as exc:
+        return run_leeloo(prompt), 200
+    except (ValueError, GeminiConfigurationError, LeelooError) as exc:
         return {"error": str(exc)}, 500
     except Exception:
         logging.exception("Agent request failed")
