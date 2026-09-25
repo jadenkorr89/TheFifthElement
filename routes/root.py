@@ -27,7 +27,7 @@ def handle_root(request):
             "ok": True,
             "service": "the-fifth-element",
             "source": "github",
-            "deployment_marker": "databricks-delta-retry-1",
+            "deployment_marker": "agent-error-details-1",
         }, 200
     if request.method != "POST":
         return {
