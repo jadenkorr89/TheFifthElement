@@ -3,13 +3,17 @@ import hashlib
 import json
 import logging
 import os
+import asyncio
 
 from google.genai import types
 from integrations.gemini import create_client
+from integrations.antavo import AntavoError, customer_custom_action, customer_get, customer_give_reward
+from integrations.antavo_mcp import session
 from integrations.databricks import (
     list_good_recovery_examples,
     list_unprocessed_recovery_candidates,
     store_recovery_decision,
+    update_recovery_action_status,
     update_recovery_decision_slack_message,
 )
 from integrations.slack import post_recovery_decision, post_recovery_failure
@@ -20,7 +24,7 @@ class RecoveryError(Exception):
     pass
 
 
-ALLOWED_ACTIONS = {"NO_ACTION", "REMINDER", "INCENTIVE", "HUMAN_REVIEW"}
+ALLOWED_ACTIONS = {"NO_ACTION", "PRIME_MESSAGE", "GIVE_REWARD", "GIVE_POINTS", "HUMAN_REVIEW"}
 
 
 def _sanitized_snapshot(candidate):
@@ -53,10 +57,47 @@ def _sanitized_snapshot(candidate):
     }
 
 
-def _decide(client, model, snapshot, settings, good_examples):
+async def _available_rewards():
+    async with session() as mcp:
+        listing = await mcp.list_tools()
+        tools = [
+            tool for tool in listing.tools
+            if "reward" in tool.name.lower()
+            and any(word in tool.name.lower() for word in ("list", "search", "get"))
+            and tool.annotations and tool.annotations.readOnlyHint is True
+            and not (tool.inputSchema or {}).get("required")
+        ]
+        if not tools:
+            raise RecoveryError("No zero-argument read-only rewards tool is available on Antavo MCP.")
+        tool = next((t for t in tools if "list" in t.name.lower()), tools[0])
+        result = await mcp.call_tool(tool.name, arguments={})
+        if result.isError:
+            raise RecoveryError("Antavo MCP rewards lookup failed.")
+        value = result.model_dump(mode="json", exclude_none=True)
+        serialized = json.dumps(value, ensure_ascii=False)
+        if len(serialized) > 30000:
+            raise RecoveryError("Antavo rewards catalog is too large.")
+        return value
+
+
+def _reward_ids(value):
+    if isinstance(value, dict):
+        ids = {str(value[key]) for key in ("id", "reward_id") if value.get(key) is not None}
+        return ids | set().union(*(_reward_ids(v) for v in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_reward_ids(v) for v in value))
+    if isinstance(value, str) and value[:1] in ("{", "["):
+        try:
+            return _reward_ids(json.loads(value))
+        except (ValueError, TypeError):
+            pass
+    return set()
+
+
+def _decide(client, model, snapshot, settings, good_examples, rewards, customer, remaining_budget):
     prompt = (
         f"{settings.cart_recovery_main_prompt}\n"
-        f"Remaining budget: {settings.cart_recovery_budget}"
+        f"Remaining budget: {remaining_budget}"
     )
     if good_examples:
         prompt += (
@@ -64,7 +105,21 @@ def _decide(client, model, snapshot, settings, good_examples):
             "Use these as guidance, not hard rules; evaluate the current cart independently:\n"
             + json.dumps(good_examples, ensure_ascii=False)
         )
-    prompt += "\n\nSanitized cart:\n" + json.dumps(snapshot, ensure_ascii=False)
+    prompt += (
+        "\n\nThis run is LIVE. Earlier dry-run wording in the stored setting is obsolete. "
+        "Choose exactly one action: NO_ACTION, PRIME_MESSAGE, GIVE_REWARD, "
+        "GIVE_POINTS, HUMAN_REVIEW. Return JSON with recommended_action, reason, "
+        "message_subject, message_body, reward_id, points. For GIVE_REWARD use "
+        "only a reward ID in the Antavo catalog. For GIVE_POINTS use a positive "
+        "integer within the remaining budget. PRIME_MESSAGE must contain a "
+        "useful message. Use the checkout link placeholder {{ recovery_url }}. "
+        "Antavo sends the email when prime_message is recorded; do not invent "
+        "delivery confirmation. Do not promise an incentive unless it is actually "
+        "available. If customer details are insufficient, choose HUMAN_REVIEW."
+        "\n\nAntavo rewards:\n" + json.dumps(rewards, ensure_ascii=False)
+        + "\n\nCustomer:\n" + json.dumps(customer, ensure_ascii=False)
+        + "\n\nSanitized cart:\n" + json.dumps(snapshot, ensure_ascii=False)
+    )
     try:
         response = client.models.generate_content(
             model=model,
@@ -92,7 +147,56 @@ def _decide(client, model, snapshot, settings, good_examples):
         "reason": reason,
         "message_subject": str(result.get("message_subject", "")).strip()[:120],
         "message_body": str(result.get("message_body", "")).strip()[:800],
+        "reward_id": str(result.get("reward_id") or "").strip(),
+        "points": result.get("points", 0),
     }
+
+
+def _execute_action(result, customer_id, rewards, remaining_budget):
+    action = result["recommended_action"]
+    if action in {"NO_ACTION", "HUMAN_REVIEW"}:
+        return {"status": "NO_ACTION", "steps": []}, 0
+    if not customer_id or not str(customer_id).isdigit():
+        return {"status": "FAILED", "steps": [{"action": action, "ok": False,
+                "detail": "Checkout has no numeric customer ID."}]}, 0
+
+    message = result["message_body"]
+    if not message or "{{ recovery_url }}" not in message:
+        return {"status": "FAILED", "steps": [{"action": action, "ok": False,
+                "detail": "Message is empty or missing the recovery URL placeholder."}]}, 0
+    points = result["points"]
+    if action == "GIVE_POINTS" and (
+        isinstance(points, bool) or not isinstance(points, int)
+        or points <= 0 or points > remaining_budget
+    ):
+        return {"status": "FAILED", "steps": [{"action": action, "ok": False,
+                "detail": "Points exceed the available budget or are invalid."}]}, 0
+    if action == "GIVE_REWARD" and result["reward_id"] not in _reward_ids(rewards):
+        return {"status": "FAILED", "steps": [{"action": action, "ok": False,
+                "detail": "Reward ID was not verified in the MCP catalog."}]}, 0
+
+    steps = []
+    try:
+        customer_custom_action(customer_id, "prime_message", message)
+        steps.append({"action": "prime_message", "ok": True,
+                      "detail": "Antavo accepted the event; delivery is unconfirmed."})
+    except AntavoError as exc:
+        return {"status": "FAILED", "steps": [{"action": "prime_message", "ok": False,
+                "detail": str(exc)[:300]}]}, 0
+
+    try:
+        if action == "GIVE_REWARD":
+            customer_give_reward(customer_id, result["reward_id"])
+            steps.append({"action": "give_reward", "ok": True,
+                          "detail": result["reward_id"]})
+        elif action == "GIVE_POINTS":
+            customer_custom_action(customer_id, "give_points", "", points)
+            steps.append({"action": "give_points", "ok": True,
+                          "detail": str(points)})
+    except AntavoError as exc:
+        steps.append({"action": action.lower(), "ok": False, "detail": str(exc)[:300]})
+        return {"status": "PARTIAL", "steps": steps}, 0
+    return {"status": "EXECUTED", "steps": steps}, points if action == "GIVE_POINTS" else 0
 
 
 def run_recovery_worker():
@@ -104,61 +208,67 @@ def run_recovery_worker():
     candidates = list_unprocessed_recovery_candidates(
         limit=int(os.environ.get("RECOVERY_BATCH_SIZE", "5"))
     )
+    if not candidates:
+        return {"ok": True, "count": 0, "processed": []}
+    rewards = asyncio.run(_available_rewards())
     processed = []
+    remaining_budget = int(settings.cart_recovery_budget)
     with create_client() as client:
         for candidate in candidates:
             snapshot = _sanitized_snapshot(candidate)
+            customer_id = candidate.get("customer_id")
+            customer = {}
+            if customer_id:
+                try:
+                    customer = customer_get(customer_id)
+                except AntavoError:
+                    logging.exception("Could not fetch recovery customer state_token=%s",
+                                      candidate["state_token"])
             try:
-                result = _decide(client, model, snapshot, settings, good_examples)
+                result = _decide(client, model, snapshot, settings, good_examples,
+                                 rewards, customer, remaining_budget)
             except Exception as exc:
-                context = {
-                    "model": model,
-                    "shop_domain": candidate.get("shop_domain"),
-                    "state_token": candidate.get("state_token"),
-                }
-                logging.exception(
-                    "Recovery decision failed for shop=%s state_token=%s model=%s",
-                    context["shop_domain"],
-                    context["state_token"],
-                    model,
-                )
+                context = {"model": model, "shop_domain": candidate.get("shop_domain"),
+                           "state_token": candidate.get("state_token")}
+                logging.exception("Recovery decision failed for %s", context)
                 try:
                     post_recovery_failure(str(exc), context)
                     setattr(exc, "slack_notified", True)
                 except Exception:
-                    logging.exception(
-                        "Could not send recovery failure notification to Slack"
-                    )
-                if isinstance(exc, RecoveryError):
-                    raise
-                raise RecoveryError(
-                    f"Recovery decision failed ({type(exc).__name__}): {str(exc)[:800]}"
-                ) from exc
+                    logging.exception("Could not send recovery failure notification")
+                raise
 
             decision_id = hashlib.sha256(
                 f"{candidate['shop_domain']}:{candidate['state_token']}".encode()
             ).hexdigest()
             decision = {
-                **result,
-                "decision_id": decision_id,
+                **result, "decision_id": decision_id,
                 "shop_domain": candidate["shop_domain"],
-                "state_token": candidate["state_token"],
-                "model": model,
-                "input_snapshot_json": json.dumps(
-                    snapshot, ensure_ascii=False, separators=(",", ":")
-                ),
+                "state_token": candidate["state_token"], "model": model,
+                "input_snapshot_json": json.dumps(snapshot, ensure_ascii=False,
+                                                  separators=(",", ":")),
             }
+            # Durable record before any side effect; scheduler retries cannot replay it.
             store_recovery_decision(decision)
-            slack_message = post_recovery_decision(decision)
-            update_recovery_decision_slack_message(
-                decision_id,
-                slack_message.get("channel"),
-                slack_message.get("ts"),
-            )
-            processed.append(
-                {
-                    "decision_id": decision_id,
-                    "recommended_action": result["recommended_action"],
-                }
-            )
-    return {"ok": True, "dry_run": True, "count": len(processed), "processed": processed}
+            execution, spent = _execute_action(result, customer_id, rewards,
+                                               remaining_budget)
+            remaining_budget -= spent
+            decision["execution"] = execution
+            try:
+                update_recovery_action_status(decision_id, execution["status"])
+            except Exception:
+                logging.exception("Action result could not be recorded; do not replay %s",
+                                  decision_id)
+            try:
+                slack_message = post_recovery_decision(decision)
+                update_recovery_decision_slack_message(
+                    decision_id, slack_message.get("channel"), slack_message.get("ts")
+                )
+            except Exception:
+                logging.exception("Action completed but Slack reporting failed for %s",
+                                  decision_id)
+                raise
+            processed.append({"decision_id": decision_id,
+                              "recommended_action": result["recommended_action"],
+                              "execution": execution})
+    return {"ok": True, "count": len(processed), "processed": processed}

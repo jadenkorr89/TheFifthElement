@@ -22,10 +22,23 @@ def _decision_blocks(decision, feedback=None):
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"Recovery proposal: {action}"},
+            "text": {"type": "plain_text", "text": f"Recovery action: {action}"},
         },
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reasoning*\n{reason}"}},
     ]
+    if decision.get("message_body"):
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": "*Message passed to Antavo*\\n" + str(decision["message_body"])[:800]}})
+    execution = decision.get("execution")
+    if execution:
+        steps = execution.get("steps", [])
+        summary = "\n".join(
+            f"• {step['action']}: {'accepted' if step['ok'] else 'failed'}"
+            + (f" — {str(step.get('detail', ''))[:300]}" if step.get("detail") else "")
+            for step in steps
+        ) or "No Antavo action taken."
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": f"*Antavo outcome: {execution['status']}*\n{summary}"}})
     if feedback:
         rating = feedback.get("rating", "")
         text = feedback.get("text", "")
@@ -44,6 +57,7 @@ def _decision_blocks(decision, feedback=None):
                 "decision_id": decision["decision_id"],
                 "recommended_action": action,
                 "reason": reason,
+                "execution": execution,
             },
             separators=(",", ":"),
         )
@@ -67,7 +81,7 @@ def _decision_blocks(decision, feedback=None):
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Dry run • Decision `{decision['decision_id'][:12]}`",
+                    "text": f"Decision `{decision['decision_id'][:12]}`",
                 }
             ],
         }
@@ -136,6 +150,7 @@ def open_recovery_feedback_modal(payload):
         decision_id = decision["decision_id"]
         recommended_action = decision["recommended_action"]
         reason = decision["reason"]
+        execution = decision.get("execution")
         trigger_id = payload["trigger_id"]
         channel_id = payload["channel"]["id"]
         message_ts = payload["message"]["ts"]
@@ -147,6 +162,7 @@ def open_recovery_feedback_modal(payload):
             "decision_id": decision_id,
             "recommended_action": recommended_action,
             "reason": reason,
+            "execution": execution,
             "channel_id": channel_id,
             "message_ts": message_ts,
         },
@@ -244,6 +260,7 @@ def parse_recovery_feedback_submission(payload):
         "decision_id": metadata.get("decision_id", ""),
         "recommended_action": metadata.get("recommended_action", ""),
         "reason": metadata.get("reason", ""),
+        "execution": metadata.get("execution"),
         "rating": rating,
         "feedback_text": feedback_text.strip()[:1500],
         "user_id": user.get("id", ""),
@@ -267,6 +284,7 @@ def update_recovery_decision_message(feedback):
         "decision_id": feedback["decision_id"],
         "recommended_action": feedback.get("recommended_action", ""),
         "reason": feedback.get("reason", ""),
+        "execution": feedback.get("execution"),
     }
     blocks = _decision_blocks(
         decision,

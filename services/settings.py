@@ -9,18 +9,13 @@ class SettingsError(Exception):
     pass
 
 
-DEFAULT_CART_RECOVERY_MAIN_PROMPT = """Evaluate one abandoned ecommerce checkout for a dry-run PoC.
-Return only a JSON object with four string fields:
-recommended_action, reason, message_subject, message_body.
-
-recommended_action must be exactly one of NO_ACTION, REMINDER, INCENTIVE,
-or HUMAN_REVIEW.
-
-Do not invent discounts, coupon codes, reward values, stock, urgency, or
-customer facts. INCENTIVE only means a verified incentive should be considered
-later. Prefer REMINDER for an ordinary cart. Use HUMAN_REVIEW for malformed or
-contradictory input. Use {{ recovery_url }} as the link placeholder. Nothing is
-being sent. Keep reason under 300 characters, subject under 120, body under 800."""
+DEFAULT_CART_RECOVERY_MAIN_PROMPT = """Evaluate an abandoned checkout and choose a single recovery action.
+Use the live Antavo customer and rewards catalog supplied with the cart.
+Prefer a useful prime_message for an ordinary cart. Offer a reward or points
+only when warranted and verified. Never invent reward IDs, balances, prices,
+discounts, urgency, or customer facts. Keep the reason short. Antavo handles
+email delivery after the prime_message event; its API acceptance is not proof
+of delivery. Choose HUMAN_REVIEW if the input is contradictory or unsafe."""
 
 
 DEFAULT_SETTINGS = {

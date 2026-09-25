@@ -646,6 +646,7 @@ def list_unprocessed_recovery_candidates(limit=5):
           c.state_token,
           c.cart_token,
           c.checkout_token,
+          c.customer_id,
           c.currency,
           c.total_price,
           c.item_count,
@@ -667,6 +668,7 @@ def list_unprocessed_recovery_candidates(limit=5):
         "state_token",
         "cart_token",
         "checkout_token",
+        "customer_id",
         "currency",
         "total_price",
         "item_count",
@@ -723,6 +725,18 @@ def store_recovery_decision(decision):
             _param("input_snapshot_json", decision["input_snapshot_json"]),
         ],
     )
+
+def update_recovery_action_status(decision_id, status):
+    if status not in {"EXECUTED", "PARTIAL", "FAILED", "NO_ACTION"}:
+        raise ValueError("Invalid recovery action status.")
+    fqn = _qualified_name(
+        "DATABRICKS_RECOVERY_DECISIONS_TABLE", "shopify_recovery_decisions"
+    )
+    execute_statement(
+        f"UPDATE {fqn} SET decision_status = :status WHERE decision_id = :decision_id",
+        [_param("status", status), _param("decision_id", decision_id)],
+    )
+
 
 def update_recovery_decision_slack_message(decision_id, channel_id, message_ts):
     ensure_recovery_decisions_table()
