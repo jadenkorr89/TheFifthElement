@@ -31,8 +31,8 @@ SYSTEM_PROMPT = (
     "Never claim a tool was called unless its result confirms it. If an operation fails, "
     "report that plainly. Keep answers concise."
 )
-MAX_CALLS = 5
-MAX_RESULT_CHARS = 30000
+MAX_CALLS = 15
+MAX_RESULT_CHARS = 60000
 
 
 class LeelooError(Exception):
