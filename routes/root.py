@@ -1,10 +1,24 @@
 """Health, manual agent, and diagnostics routes."""
 
 import logging
+import uuid
+
+from google.genai.errors import APIError
 
 from integrations.databricks import DatabricksError, count_shopify_events
 from integrations.gemini import GeminiConfigurationError
 from services.leeloo import DEFAULT_PROMPT, LeelooError, run_leeloo
+
+
+def _error_details(exc):
+    """Summarize nested transport errors without logging request or response bodies."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [detail for child in exc.exceptions for detail in _error_details(child)]
+    detail = {"type": type(exc).__name__}
+    if isinstance(exc, APIError):
+        detail["upstream"] = "gemini"
+        detail["status"] = exc.code
+    return [detail]
 
 
 def handle_root(request):
@@ -35,9 +49,13 @@ def handle_root(request):
         return run_leeloo(prompt), 200
     except (ValueError, GeminiConfigurationError, LeelooError) as exc:
         return {"error": str(exc)}, 500
-    except Exception:
-        logging.exception("Agent request failed")
-        return {"error": "Agent request failed; see logs."}, 502
+    except Exception as exc:
+        error_id = uuid.uuid4().hex[:12]
+        logging.error(
+            "Agent request failed error_id=%s details=%s",
+            error_id, _error_details(exc), exc_info=True,
+        )
+        return {"error": "Agent request failed; see logs.", "error_id": error_id}, 502
 
 
 def _test_databricks():
