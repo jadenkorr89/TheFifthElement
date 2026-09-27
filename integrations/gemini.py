@@ -14,8 +14,6 @@ def create_client():
     backend = os.environ.get("GEMINI_BACKEND", "developer")
     options = types.HttpOptions(
         timeout=60000,
-        max_retries=4,      # Keep native exponential backoff active
-        api_version="v1",
         headers={
             # Forces the request to process via standard paygo instead of demanding a PT subscription
             "X-Vertex-AI-LLM-Request-Type": "shared",
