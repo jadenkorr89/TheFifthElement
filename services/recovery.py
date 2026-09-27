@@ -112,7 +112,9 @@ def _decide(client, model, snapshot, settings, good_examples, rewards, customer,
         "message_subject, message_body, reward_id, points. For GIVE_REWARD use "
         "only a reward ID in the Antavo catalog. For GIVE_POINTS use a positive "
         "integer within the remaining budget. PRIME_MESSAGE must contain a "
-        "useful message. Use the checkout link placeholder {{ recovery_url }}. "
+        "useful message. A checkout link is optional; do not require the "
+        "{{ recovery_url }} placeholder or invent a URL. Only include a link "
+        "if a usable one is supplied. "
         "Antavo sends the email when prime_message is recorded; do not invent "
         "delivery confirmation. Do not promise an incentive unless it is actually "
         "available. If customer details are insufficient, choose HUMAN_REVIEW."
@@ -161,9 +163,9 @@ def _execute_action(result, customer_id, rewards, remaining_budget):
                 "detail": "Checkout has no numeric customer ID."}]}, 0
 
     message = result["message_body"]
-    if not message or "{{ recovery_url }}" not in message:
+    if not message:
         return {"status": "FAILED", "steps": [{"action": action, "ok": False,
-                "detail": "Message is empty or missing the recovery URL placeholder."}]}, 0
+                "detail": "Message is empty."}]}, 0
     points = result["points"]
     if action == "GIVE_POINTS" and (
         isinstance(points, bool) or not isinstance(points, int)
