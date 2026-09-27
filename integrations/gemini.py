@@ -13,7 +13,7 @@ class GeminiConfigurationError(Exception):
 def create_client():
     backend = os.environ.get("GEMINI_BACKEND", "developer")
     options = types.HttpOptions(
-        timeout=60000
+        timeout=60000,
         max_retries=4,      # Keep native exponential backoff active
         api_version="v1",
         headers={
@@ -22,6 +22,7 @@ def create_client():
             # Signals the backend load-balancers to route this to the VIP priority queue
             "X-Vertex-AI-LLM-Shared-Request-Type": "priority"
         }
+    )
     if backend == "developer":
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
