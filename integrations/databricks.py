@@ -173,7 +173,7 @@ def ensure_cart_state_objects():
     )
     execute_statement(
         f"""
-        CREATE OR REPLACE VIEW {candidates_fqn} AS
+        CREATE VIEW IF NOT EXISTS {candidates_fqn} AS
         SELECT *
         FROM {state_fqn}
         WHERE status = 'ACTIVE'
